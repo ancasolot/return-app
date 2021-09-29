@@ -54,6 +54,8 @@ const messages = defineMessages({
   sendLabel: { id: 'returns.sendLabel' },
   shippingLabelSuccess: { id: 'returns.labelSuccess' },
   shippingLabelError: { id: 'returns.labelError' },
+  quantity: { id: 'returns.quantity' },
+  productValueToRefund: { id: 'returns.productValueToRefund' },
 })
 
 class ReturnForm extends Component<any, any> {
@@ -309,20 +311,22 @@ class ReturnForm extends Component<any, any> {
   }
 
   handleTaxes = async () => {
-    const {
-      request,
-      product,
-    } = this.state
+    const { request, product } = this.state
 
     let taxItems: any
     if (request) {
       try {
         await fetch(`${fetchPath.getOrder}${request.orderId}`)
-        .then((response) => response.json())
-        .then((res) => {
-          taxItems = res.items
-          return Promise.resolve(res)
-        })
+          .then((response) => response.json())
+          .then((res) => {
+            taxItems = res.items
+            this.setState({
+              totalShippingValue: (
+                res.totals.find((total) => total.id === 'Shipping').value / 100
+              ).toFixed(2),
+            })
+            return Promise.resolve(res)
+          })
       } catch (e) {
         // console.log(e)
       }
@@ -333,15 +337,17 @@ class ReturnForm extends Component<any, any> {
       let totalTax = 0
 
       if (taxItem.tax) {
-        totalTax += (Number((taxItem.tax / 100).toFixed(2)) || 0)
+        totalTax += Number((taxItem.tax / 100).toFixed(2)) || 0
       } else if (taxItem.priceTags) {
         for (const pricetag of taxItem.priceTags) {
           if (pricetag.name.includes('TAXHUB')) {
-            totalTax += (pricetag.rawValue || 0)
+            totalTax += pricetag.rawValue || 0
           }
         }
 
-        const individualTax = parseFloat((totalTax / parseInt(taxItem.quantity)).toFixed(2))
+        const individualTax = parseFloat(
+          (totalTax / parseInt(taxItem.quantity)).toFixed(2)
+        )
         taxCalculations.push({
           tax: individualTax,
           sellerSku: taxItem.sellerSku,
@@ -354,8 +360,15 @@ class ReturnForm extends Component<any, any> {
     for (const taxItem of taxCalculations) {
       for (const productItem of newProducts) {
         if (!productItem.tax && taxItem.sellerSku === productItem.sku) {
-          productItem['tax'] = taxItem.tax
-          totalAmount += (productItem.totalPrice / 100 + (parseFloat(taxItem.tax) || 0) * productItem.quantity)
+          productItem.tax = taxItem.tax
+          productItem.totalValue =
+            productItem.totalPrice / 100 +
+            (parseFloat(taxItem.tax) || 0) * productItem.quantity
+          productItem.quantity *
+            (productItem.unitPrice + (parseFloat(productItem.tax) || 0) * 100)
+          totalAmount +=
+            productItem.totalPrice / 100 +
+            (parseFloat(taxItem.tax) || 0) * productItem.quantity
         }
       }
     }
@@ -579,6 +592,7 @@ class ReturnForm extends Component<any, any> {
                 quantityInput > product.quantity
                   ? product.quantity
                   : quantityInput,
+              refundedValue: !quantityInput && 0,
               status,
             }
           : el
@@ -586,12 +600,44 @@ class ReturnForm extends Component<any, any> {
     }))
   }
 
+  handleRefundedValue(product: any, refundedValue: any) {
+    if (
+      product.status === requestsStatuses.approved ||
+      product.status === requestsStatuses.partiallyApproved
+    ) {
+      this.setState((prevState) => ({
+        productsForm: prevState.productsForm.map((el) =>
+          el.id === product.id
+            ? {
+                ...el,
+                refundedValue:
+                  refundedValue > product.totalValue
+                    ? product.totalValue
+                    : refundedValue,
+              }
+            : el
+        ),
+      }))
+    }
+  }
+
+  handleRefundedShippingValue(refundedShippingValue: any) {
+    const { totalShippingValue } = this.state
+
+    this.setState({
+      refundedShippingValue:
+        refundedShippingValue > totalShippingValue
+          ? totalShippingValue
+          : refundedShippingValue,
+    })
+  }
+
   verifyPackage() {
-    const { request, productsForm } = this.state
-    let refundedAmount = 0
+    const { request, productsForm, refundedShippingValue } = this.state
+    let refundedAmount = refundedShippingValue * 100 || 0
 
     productsForm.forEach((currentProduct) => {
-      refundedAmount += currentProduct.goodProducts * (currentProduct.unitPrice + (parseFloat(currentProduct.tax) * 100))
+      refundedAmount += parseInt(currentProduct.refundedValue) * 100
       this.saveMasterData(schemaNames.product, currentProduct)
     })
 
@@ -923,6 +969,8 @@ class ReturnForm extends Component<any, any> {
       showMain,
       showProductsForm,
       giftCardValue,
+      totalShippingValue,
+      refundedShippingValue,
       totalAmount,
     } = this.state
 
@@ -956,6 +1004,8 @@ class ReturnForm extends Component<any, any> {
           ) : null}
 
           <ProductsTable
+            totalShippingValue={totalShippingValue}
+            refundedShippingValue={refundedShippingValue}
             product={product}
             totalRefundAmount={request.refundedAmount}
             productsValue={totalAmount}
@@ -1008,7 +1058,10 @@ class ReturnForm extends Component<any, any> {
             <thead>
               <tr>
                 <th>{formatMessage({ id: messages.product.id })}</th>
-                <th />
+                <th>{formatMessage({ id: messages.quantity.id })}</th>
+                <th>
+                  {formatMessage({ id: messages.productValueToRefund.id })}
+                </th>
                 <th />
               </tr>
             </thead>
@@ -1032,6 +1085,24 @@ class ReturnForm extends Component<any, any> {
                         min={0}
                       />
                     </td>
+                    <td className={styles.mediumCell}>
+                      <Input
+                        suffix={`/${currentProduct.totalValue}`}
+                        size="small"
+                        type="number"
+                        step="any"
+                        onChange={(e) => {
+                          this.handleRefundedValue(
+                            currentProduct,
+                            e.target.value
+                          )
+                        }}
+                        value={currentProduct.refundedValue}
+                        max={currentProduct.totalValue}
+                        min={0.0}
+                        disabled={!currentProduct.goodProducts}
+                      />
+                    </td>
                     <td
                       className={`${styles.paddingLeft20} ${styles.mediumCell}`}
                     >
@@ -1046,6 +1117,24 @@ class ReturnForm extends Component<any, any> {
                   </td>
                 </tr>
               )}
+              <tr>
+                <td className={styles.alignEnd} colSpan={2}>
+                  <strong>Order shipping value</strong>
+                </td>
+                <td className={styles.mediumCell}>
+                  <Input
+                    suffix={`/${totalShippingValue}`}
+                    type="number"
+                    step="any"
+                    onChange={(e) => {
+                      this.handleRefundedShippingValue(e.target.value)
+                    }}
+                    value={refundedShippingValue}
+                    max={totalShippingValue}
+                    min={0}
+                  />
+                </td>
+              </tr>
             </tbody>
           </table>
           <div className="mt6">
